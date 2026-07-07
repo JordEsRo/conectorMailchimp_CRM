@@ -30,11 +30,14 @@ df = read_data_from_csv(file_path)
 obj_cols = df.select_dtypes(include=["object", "string"]).columns # type: ignore
 df[obj_cols] = df[obj_cols].apply(lambda s: s.str.strip()) # type: ignore
 
-df['codigo_brief'] = df['Title'].str.extract(r'(BRI-\d+)')  # Extract numeric code from the 'Title' column # type: ignore
+df["codigo_brief"] = df["Title"].str.extract( # type: ignore
+    r"(BRI-\d+(?:\s*-\s*[A-Za-z0-9]+)?)",
+    expand=False
+) # Extract numeric code from the 'Title' column
 
-df_limpio = df[df["codigo_brief"].notna()].copy() # type: ignore
+#df_limpio = df[df["codigo_brief"].notna()].copy() # type: ignore
 
-df_limpio = df_limpio.rename(columns={
+df_limpio = df.rename(columns={ # type: ignore
     "Title": "title",
     "Subject": "subject",
     "Audience": "audience",
@@ -79,8 +82,8 @@ df_limpio["send_date"] = pd.to_datetime(
 
 df_limpio.to_csv('campaigns_with_codes.csv', index=False)  # Save the DataFrame to a new CSV file
 
-print(df_limpio.shape)
-print(df_limpio.head())
+# print(df_limpio.shape)
+# print(df_limpio.head())
 
 server = os.getenv('DB_SERVER') 
 database = os.getenv('DB_NAME') 
