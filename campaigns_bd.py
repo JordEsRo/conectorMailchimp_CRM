@@ -158,7 +158,7 @@ async def campaigns_all(list_id: str, fecha_inicio: str, fecha_termina: str):
             expand=False
             ) 
 
-            df_campaigns.to_csv(f"campaigns_report_{fecha_inicio}_{fecha_termina}.csv", index=False)
+            #df_campaigns.to_csv(f"campaigns_report_{fecha_inicio}_{fecha_termina}.csv", index=False)
 
             print(f"Total records fetched: {len(df_campaigns)}")
 

@@ -12,6 +12,7 @@ import pyodbc
 from sqlalchemy import create_engine, text
 import traceback
 from sqlalchemy.exc import SQLAlchemyError,DBAPIError
+import time
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -41,7 +42,7 @@ params = urllib.parse.quote_plus(connection_string)
 engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
 
 with engine.begin() as connection:
-    df_ids = pd.read_sql_query("SELECT top 10 id FROM UPAXIS.MAILCHIMP_CAMPAIGN where convert(nvarchar(6),fecha_envio,112) between '202601' and '202612' order by 1", connection)
+    df_ids = pd.read_sql_query("SELECT id FROM UPAXIS.MAILCHIMP_CAMPAIGN where convert(nvarchar(6),fecha_envio,112) between '202601' and '202612' and estado IN ('P','X') order by 1", connection)
 
 df_ids.to_csv("campaign_ids.csv", index=False)
 
@@ -81,7 +82,7 @@ async def fetch_page(client, base_url, offset, count):
 
         except httpx.RequestError as e:
             print(type(e))
-            print(e)
+            #print(e)
 
 # dataframe builder
 def build_dataframe(results, mapper):
@@ -205,26 +206,106 @@ def insert_bd(df_charge):
         traceback.print_exc()
 
 
+def marcar_en_proceso(campaign_id, connection):
+
+    query = text("""
+        UPDATE UPAXIS.MAILCHIMP_CAMPAIGN
+        SET
+            estado = 'E',
+            mensaje_error = NULL
+        WHERE id = :id
+    """)
+
+    connection.execute(query, {"id": campaign_id})
+
+def marcar_error(campaign_id, error, connection):
+
+    query = text("""
+        UPDATE UPAXIS.MAILCHIMP_CAMPAIGN
+        SET
+            estado = 'X',
+            mensaje_error = :error
+        WHERE id = :id
+    """)
+
+    connection.execute(
+        query,
+        {
+            "id": campaign_id,
+            "error": str(error)[:500]
+        }
+    )
+
+def confirmar_lote(campañas_lote, connection):
+
+    query = text("""
+        UPDATE UPAXIS.MAILCHIMP_CAMPAIGN
+        SET
+            estado = 'C',
+            fecha_actua_miembros = GETDATE(),
+            mensaje_error = NULL
+        WHERE id = :id
+    """)
+
+    for campaign_id in campañas_lote:
+        connection.execute(query, {"id": campaign_id})
+
+# main
 if __name__ == "__main__":
     try:
-        dfs_final = []
-        for i, campaign_id in enumerate(df_ids["id"], start=1):
-            print(f"Procesando campaña {i}: {campaign_id}")
-            df = asyncio.run(sent_to_all(campaign_id))
+        async def main_async():
+            TOTAL_FILAS = 0
+            dfs_final = []
+            campañas_lote = []
+        
+            for i, campaign_id in enumerate(df_ids["id"], start=1):
+                print(f"Procesando campaña {i}: {campaign_id}")
+                try:
+                    with engine.begin() as connection:
+                        marcar_en_proceso(campaign_id, connection)
 
-            if df is not None:
-                dfs_final.append(df)
+                    df = await sent_to_all(campaign_id)
 
-            # Cada 20 campañas
-            if i % 20 == 0:
+                    if df is not None and not df.empty:
+
+                        dfs_final.append(df)
+                        campañas_lote.append(campaign_id)
+                        TOTAL_FILAS += len(df)
+
+                    if TOTAL_FILAS >= 50000:
+
+                        df_charge = pd.concat(dfs_final, ignore_index=True)
+                        insert_bd(df_charge)
+
+                        with engine.begin() as connection:
+                            confirmar_lote(campañas_lote, connection)
+
+                        dfs_final = []
+                        campañas_lote = []
+                        TOTAL_FILAS = 0
+
+                    if i % 50 == 0:
+
+                        print("Esperando 20 segundos...")
+                        await asyncio.sleep(20)
+
+                except Exception as e:
+                    traceback.print_exc()
+                    with engine.begin() as connection:
+                        marcar_error(campaign_id, e, connection)
+
+            if dfs_final:
+
                 df_charge = pd.concat(dfs_final, ignore_index=True)
-                insert_bd(df_charge)
-                dfs_final = []
 
-        # Inserta las restantes
-        if dfs_final:
-            df_charge = pd.concat(dfs_final, ignore_index=True)
-            insert_bd(df_charge)
-        print("Proceso completado.")
+                insert_bd(df_charge)
+
+                with engine.begin() as connection:
+                    confirmar_lote(campañas_lote, connection)
+
+            print("Proceso completado.")
+
+        asyncio.run(main_async())
+
     except Exception as e:
         traceback.print_exc()
