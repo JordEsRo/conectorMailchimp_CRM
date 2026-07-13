@@ -48,7 +48,7 @@ async def fetch_page(client, base_url, offset, count, list_id):
         "sort_dir": "DESC",
         "before_send_time": fecha_termina,
         "since_send_time": fecha_inicio,
-        "fields": "campaigns.id,campaigns.settings.title,campaigns.send_time,campaigns.recipients.list_name,campaigns.settings.from_name,campaigns.emails_sent.campaigns.report_summary.unique_opens,campaigns.report_summary.subscriber_clicks,campaigns.report_summary.opens,campaigns.report_summary.clicks"
+        "fields": "campaigns.id,campaigns.settings.title,campaigns.send_time,campaigns.recipients.list_name,campaigns.settings.from_name,campaigns.emails_sent,campaigns.report_summary.unique_opens,campaigns.report_summary.subscriber_clicks,campaigns.report_summary.opens,campaigns.report_summary.clicks"
     }
     print(f"Fetching page with offset {offset} and count {count}...")
     for intento in range(3):

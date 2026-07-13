@@ -42,7 +42,14 @@ params = urllib.parse.quote_plus(connection_string)
 engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
 
 with engine.begin() as connection:
-    df_ids = pd.read_sql_query("SELECT id FROM UPAXIS.MAILCHIMP_CAMPAIGN where convert(nvarchar(6),fecha_envio,112) between '202601' and '202612' and estado IN ('P','X') order by 1", connection)
+    df_ids = pd.read_sql_query("" \
+    "SELECT id " \
+    "FROM UPAXIS.MAILCHIMP_CAMPAIGN " \
+    "where convert(nvarchar(6),fecha_envio,112) between '202501' and '202512' "
+    "and estado IN ('P','X','E') " \
+    "order by fecha_envio desc", connection)
+
+print(f"Cantidad de ids a procesar...",{len(df_ids)})
 
 df_ids.to_csv("campaign_ids.csv", index=False)
 
@@ -58,31 +65,94 @@ timeout = httpx.Timeout(
 )
 
 # recorrido de paginas
-async def fetch_page(client, base_url, offset, count):
+async def fetch_page(client, base_url, offset, count, campaign_id):
     #async with semaphore:
     params = {
         "offset": offset,
         "count": count,
         "fields": "sent_to.email_address,sent_to.campaign_id,sent_to.status,sent_to.open_count,sent_to.last_open"
     }
-    print(f"Fetching page with offset {offset} and count {count}...")
+    print(f"Fetching page for campaing {campaign_id} with offset {offset} and count {count}...")
+
+    ultimo_error = None
+
     for intento in range(3):
         try:
             response = await client.get(base_url, headers=headers, params=params)
             response.raise_for_status()
+
             data = response.json()
+
             return data["sent_to"]
-        
-        except httpx.ReadTimeout:
-            print(f"Timeout. Reintentando ({intento + 1}/3)...")
-            await asyncio.sleep(10)
-            
+
         except httpx.HTTPStatusError as e:
-            print(f"HTTP {e.response.status_code} en offset={offset}")
+            ultimo_error = e
+
+            print(f"Status: {e.response.status_code}")
+            print(f"Body: {e.response.text}")
+
+            if intento < 2:
+                await asyncio.sleep(10)
 
         except httpx.RequestError as e:
-            print(type(e))
-            #print(e)
+            ultimo_error = e
+
+            print(f"RequestError: {type(e).__name__}")
+            print(f"URL: {e.request.url}")
+            print(e)
+
+            if intento < 2:
+                await asyncio.sleep(10)
+
+        except Exception as e:
+            ultimo_error = e
+
+            print(
+                f"Campaña {campaign_id} "
+                f"offset={offset} "
+                f"intento={intento+1} "
+                f"error={repr(e)}"
+            )
+
+            if intento < 2:
+                await asyncio.sleep(10)
+
+    if ultimo_error is not None:
+        raise ultimo_error
+
+    raise RuntimeError(f"No se pudo obtener la página de la campaña {campaign_id}")
+
+# obtener cantidad de paginas
+async def obtener_total_items(client, url_sent_to_all,campaign_id):
+
+    params = {
+        "fields": "total_items"
+    }
+
+    for intento in range(3):
+        try:
+            response = await client.get(
+                url_sent_to_all,
+                headers=headers,
+                params=params
+            )
+
+            response.raise_for_status()
+
+            return response.json().get("total_items", 0)
+
+        except Exception as e:
+
+            print(
+                f"Error obteniendo total_items de {campaign_id} "
+                f"intento {intento+1}/3 "
+                f"{type(e).__name__}: {e}"
+            )
+
+            if intento == 2:
+                raise
+
+            await asyncio.sleep(10)
 
 # dataframe builder
 def build_dataframe(results, mapper):
@@ -98,16 +168,20 @@ def build_dataframe(results, mapper):
         for r in page:
             rows.append(mapper(r))
 
-    return pd.DataFrame(rows)
+    columnas = [
+        "email",
+        "idcampaign",
+        "status",
+        "aperturas",
+        "Ultima_apertura"
+    ]
+
+    return pd.DataFrame(rows, columns=columnas)
 
 async def sent_to_all(campaign_id: str):
     count = 1000
 
     url_sent_to_all = f"{url}/reports/{campaign_id}/sent-to"
-
-    params_page = {        
-        "fields": "total_items",
-    }
 
     #print(f"Parameters for total items: {params_page}")
 
@@ -116,17 +190,23 @@ async def sent_to_all(campaign_id: str):
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             print("Fetching total items...")
-            response = await client.get(url_sent_to_all, headers=headers, params=params_page)
-            response.raise_for_status()
-            total_items = response.json().get("total_items", 0)
+            total_items = await obtener_total_items(
+                client,
+                url_sent_to_all,
+                campaign_id
+            )
 
-            total_pages = math.ceil(total_items / count)
+            if total_items == 0:
+                print(f"Campaña {campaign_id}: no tiene destinatarios.")
+                return None
+
+            total_pages = math.ceil(total_items / count) # type:ignore
 
             print(f"Total items: {total_items}, Total pages: {total_pages}")
 
             results = []
 
-            for offset in range(0, total_items, count):
+            for offset in range(0, total_items, count): # type:ignore
                 print(f"Consultando offset {offset}")
 
                 page = await fetch_page(
@@ -134,10 +214,11 @@ async def sent_to_all(campaign_id: str):
                     url_sent_to_all,
                     offset,
                     count,
+                    campaign_id
                     #semaphore
                 )
                 results.append(page)
-            
+
             df_sent_to = build_dataframe(
                 results,
                 lambda r : {
@@ -148,6 +229,11 @@ async def sent_to_all(campaign_id: str):
                     "Ultima_apertura": r.get("last_open") or None, # send_time
                 }
             )
+
+            if df_sent_to.empty:
+                print("No hay datos para procesar.")
+                return df_sent_to
+
 
             df_sent_to["Ultima_apertura"] = (
                 pd.to_datetime(
@@ -165,18 +251,22 @@ async def sent_to_all(campaign_id: str):
 
             print(f"Total records fetched: {len(df_sent_to)}")
 
-            if df_sent_to.empty:
-                print("No hay datos para procesar.")
-                return None
+            print(
+                campaign_id,
+                total_items,
+                len(df_sent_to)
+            )
 
             return df_sent_to
 
         except httpx.HTTPStatusError as e:
             print(e.response.status_code)
             print(e.response.text)
+            raise
 
         except httpx.RequestError as e:
             print(e)
+            raise
 
 def insert_bd(df_charge):
     try:
@@ -198,12 +288,14 @@ def insert_bd(df_charge):
                 except DBAPIError as e:
                     print("Error SQL Server:")
                     print(e.orig)
+                    raise
 
                 except Exception:
                     traceback.print_exc()
-
-    except Exception as e:
+                    raise
+    except Exception:
         traceback.print_exc()
+        raise
 
 
 def marcar_en_proceso(campaign_id, connection):
@@ -248,53 +340,77 @@ def confirmar_lote(campañas_lote, connection):
     """)
 
     for campaign_id in campañas_lote:
+        print(f"Confirmando {campaign_id}")
         connection.execute(query, {"id": campaign_id})
+    print("Confirmación terminada")
 
-# main
-if __name__ == "__main__":
-    try:
-        async def main_async():
-            TOTAL_FILAS = 0
-            dfs_final = []
-            campañas_lote = []
-        
-            for i, campaign_id in enumerate(df_ids["id"], start=1):
-                print(f"Procesando campaña {i}: {campaign_id}")
-                try:
-                    with engine.begin() as connection:
-                        marcar_en_proceso(campaign_id, connection)
 
-                    df = await sent_to_all(campaign_id)
+sem = asyncio.Semaphore(3)
 
-                    if df is not None and not df.empty:
+async def procesar_campania(campaign_id):
+    async with sem:
+        try:
+            print(f"Procesando campaña {campaign_id}")
 
-                        dfs_final.append(df)
-                        campañas_lote.append(campaign_id)
-                        TOTAL_FILAS += len(df)
+            with engine.begin() as connection:
+                marcar_en_proceso(campaign_id, connection)
 
-                    if TOTAL_FILAS >= 50000:
+            df = await sent_to_all(campaign_id)
 
-                        df_charge = pd.concat(dfs_final, ignore_index=True)
-                        insert_bd(df_charge)
+            return campaign_id, df, None
 
-                        with engine.begin() as connection:
-                            confirmar_lote(campañas_lote, connection)
+        except Exception as e:
+            traceback.print_exc()
 
-                        dfs_final = []
-                        campañas_lote = []
-                        TOTAL_FILAS = 0
+            with engine.begin() as connection:
+                marcar_error(campaign_id, e, connection)
 
-                    if i % 50 == 0:
+            return campaign_id, None, e
 
-                        print("Esperando 20 segundos...")
-                        await asyncio.sleep(20)
 
-                except Exception as e:
-                    traceback.print_exc()
-                    with engine.begin() as connection:
-                        marcar_error(campaign_id, e, connection)
+async def main_async():
 
-            if dfs_final:
+    TOTAL_FILAS = 0
+    dfs_final = []
+    campañas_lote = []
+
+    tareas = [
+        asyncio.create_task(procesar_campania(campaign_id))
+        for campaign_id in df_ids["id"]
+    ]
+
+    procesadas = 0
+
+    for tarea in asyncio.as_completed(tareas):
+
+        try:
+            campaign_id, df, error = await tarea
+
+            procesadas += 1
+
+            if procesadas % 50 == 0:
+                print("Esperando 20 segundos...")
+                await asyncio.sleep(20)
+
+            if error:
+                continue
+
+            if df is None or df.empty:
+                with engine.begin() as connection:
+                    marcar_error(
+                        campaign_id,
+                        "No se recuperaron destinatarios",
+                        connection
+                    )
+                    continue
+
+            dfs_final.append(df)
+            campañas_lote.append(campaign_id)
+            TOTAL_FILAS += len(df)
+
+            if TOTAL_FILAS >= 50000:
+
+                print(f"Insertando {TOTAL_FILAS} registros...")
 
                 df_charge = pd.concat(dfs_final, ignore_index=True)
 
@@ -303,9 +419,33 @@ if __name__ == "__main__":
                 with engine.begin() as connection:
                     confirmar_lote(campañas_lote, connection)
 
-            print("Proceso completado.")
+                dfs_final = []
+                campañas_lote = []
+                TOTAL_FILAS = 0
 
+        except Exception:
+            traceback.print_exc()
+
+    # Inserta lo pendiente
+    if dfs_final:
+
+        df_charge = pd.concat(dfs_final, ignore_index=True)
+
+        print("Insertando lote...con:", len(df_charge),"elementos")
+        insert_bd(df_charge)
+        print("Insert terminado...con:", len(df_charge),"elementos")
+
+        with engine.begin() as connection:
+            confirmar_lote(campañas_lote, connection)
+
+    print("Proceso completado.")
+
+
+# main
+if __name__ == "__main__":
+
+    try:
         asyncio.run(main_async())
 
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
