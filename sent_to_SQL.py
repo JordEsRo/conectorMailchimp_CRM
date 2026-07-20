@@ -45,7 +45,7 @@ with engine.begin() as connection:
     df_ids = pd.read_sql_query("" \
     "SELECT id " \
     "FROM UPAXIS.MAILCHIMP_CAMPAIGN " \
-    "where convert(nvarchar(6),fecha_envio,112) between '202501' and '202512' "
+    "where convert(nvarchar(6),fecha_envio,112) between '202601' and '202612' "
     "and estado IN ('P','X','E') " \
     "order by fecha_envio desc", connection)
 
@@ -251,10 +251,13 @@ async def sent_to_all(campaign_id: str):
 
             print(f"Total records fetched: {len(df_sent_to)}")
 
-            print(
+            print("------------> De la campaña:",
                 campaign_id,
+                "se tiene un total de ",
                 total_items,
-                len(df_sent_to)
+                "con un Dataframe de",
+                len(df_sent_to),
+                "elemetos"
             )
 
             return df_sent_to
@@ -345,7 +348,7 @@ def confirmar_lote(campañas_lote, connection):
     print("Confirmación terminada")
 
 
-sem = asyncio.Semaphore(3)
+sem = asyncio.Semaphore(2)
 
 async def procesar_campania(campaign_id):
     async with sem:
