@@ -38,6 +38,22 @@ timeout = httpx.Timeout(
     pool=30.0
 )
 
+server = os.getenv('DB_SERVER') 
+database = os.getenv('DB_NAME') 
+username = os.getenv('DB_USER') 
+password = os.getenv('DB_PASSWORD') 
+connection_string = ( 
+    f'DRIVER={{ODBC Driver 17 for SQL Server}};' 
+    f'SERVER={server};' 
+    f'DATABASE={database};' 
+    f'UID={username};' 
+    f'PWD={password};'
+    'Encrypt=no;'
+    'TrustServerCertificate=yes;' 
+)
+params = urllib.parse.quote_plus(connection_string)
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+
 # recorrido de paginas
 async def fetch_page(client, base_url, offset, count, list_id):
     params = {
@@ -58,16 +74,68 @@ async def fetch_page(client, base_url, offset, count, list_id):
             data = response.json()
             return data["campaigns"]
         
-        except httpx.ReadTimeout:
-            print(f"Timeout. Reintentando ({intento + 1}/3)...")
-            await asyncio.sleep(10)
-            
         except httpx.HTTPStatusError as e:
-            print(f"HTTP {e.response.status_code} en offset={offset}")
+            ultimo_error = e
+
+            print(f"Status: {e.response.status_code}")
+            print(f"Body: {e.response.text}")
+
+            if intento < 2:
+                await asyncio.sleep(10)
 
         except httpx.RequestError as e:
-            print(type(e))
+            ultimo_error = e
+
+            print(f"RequestError: {type(e).__name__}")
+            print(f"URL: {e.request.url}")
             print(e)
+
+            if intento < 2:
+                await asyncio.sleep(10)
+
+        except Exception as e:
+            ultimo_error = e
+
+            print(
+                f"offset={offset} "
+                f"intento={intento+1} "
+                f"error={repr(e)}"
+            )
+
+            if intento < 2:
+                await asyncio.sleep(10)
+
+    if ultimo_error is not None:
+        raise ultimo_error
+
+    raise RuntimeError(f"No se pudo obtener la página de la campaña {campaign_id}")
+
+# obtener cantidad de paginas
+async def obtener_total_items(client, url_campaign_all, params):
+
+    for intento in range(3):
+        try:
+            response = await client.get(
+                url_campaign_all,
+                headers=headers,
+                params=params
+            )
+
+            response.raise_for_status()
+
+            return response.json().get("total_items", 0)
+
+        except Exception as e:
+
+            print(
+                f"intento {intento+1}/3 "
+                f"{type(e).__name__}: {e}"
+            )
+
+            if intento == 2:
+                raise
+
+            await asyncio.sleep(10)
 
 # dataframe builder
 def build_dataframe(results, mapper):
@@ -83,7 +151,20 @@ def build_dataframe(results, mapper):
         for r in page:
             rows.append(mapper(r))
 
-    return pd.DataFrame(rows)
+    columnas = [
+        "id",
+        "nombre",
+        "fecha_envio",
+        "audiencia",
+        "remitente",
+        "correos_enviados",
+        "aperturas",
+        "clicks",
+        "total_aperturas",
+        "total_clicks",
+    ]
+
+    return pd.DataFrame(rows, columns=columnas)
 
 # metric getters
 def get_metric(items, key):
@@ -107,10 +188,17 @@ async def campaigns_all(list_id: str, fecha_inicio: str, fecha_termina: str):
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             print("Fetching total items...")
-            response = await client.get(url_campaigns_all, headers=headers, params=params_page)
-            response.raise_for_status()
-            total_items = response.json().get("total_items", 0)
 
+            total_items = await obtener_total_items(
+                client,
+                url_campaigns_all,
+                params_page
+            )
+
+            if total_items == 0:
+                print(f"No existe campañas para la audiencia {list_id} en el rango de fechas {fecha_inicio} - {fecha_termina}.")
+                return None
+            
             total_pages = math.ceil(total_items / count)
 
             print(f"Total items: {total_items}, Total pages: {total_pages}")
@@ -167,63 +255,49 @@ async def campaigns_all(list_id: str, fecha_inicio: str, fecha_termina: str):
                 print("No hay datos para procesar.")
                 return "SIN DATOS"
 
-            server = os.getenv('DB_SERVER') 
-            database = os.getenv('DB_NAME') 
-            username = os.getenv('DB_USER') 
-            password = os.getenv('DB_PASSWORD') 
-            connection_string = ( 
-                f'DRIVER={{ODBC Driver 17 for SQL Server}};' 
-                f'SERVER={server};' 
-                f'DATABASE={database};' 
-                f'UID={username};' 
-                f'PWD={password};'
-                'Encrypt=no;'
-                'TrustServerCertificate=yes;' 
-            )
-            params = urllib.parse.quote_plus(connection_string)
-            engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
-
-            try:
-                with engine.begin() as connection:
-
-                    #connection.execute(text("DELETE FROM UPAXIS.MAILCHIMP_CAMPAIGN"))
-                    for i in range(0, len(df_campaigns), 1000):
-                        try:
-                            print(f"Insertando filas {i} - {i+1000}")
-
-                            df_campaigns.iloc[i:i+1000].to_sql(
-                                "MAILCHIMP_CAMPAIGN",
-                                schema="UPAXIS",
-                                con=connection,
-                                if_exists="append",
-                                index=False
-                            )
-                        except DBAPIError as e:
-                            print("Error SQL Server:")
-                            print(e.orig)
-
-                        except Exception as e:
-                            print("Error general:")
-                            print(e)
-                            break
-
-            except Exception as e:
-                traceback.print_exc()
-
-
-            return "LISTO!"
+            return df_campaigns
 
         except httpx.HTTPStatusError as e:
             print(e.response.status_code)
             print(e.response.text)
+            raise
 
         except httpx.RequestError as e:
             print(e)
+            raise
 
+def insert_bd(df_charge):
+    try:
+        with engine.begin() as connection:
+
+            for i in range(0, len(df_charge), 300):
+                try:
+                    print(f"Insertando filas {i} - {i+300}")
+
+                    df_charge.iloc[i:i+300].to_sql(
+                        "MAILCHIMP_CAMPAIGN",
+                        schema="UPAXIS",
+                        con=connection,
+                        if_exists="append",
+                        index=False,
+                        method="multi"
+                    )
+                except DBAPIError as e:
+                    print("Error SQL Server:")
+                    print(e.orig)
+                    raise
+
+                except Exception:
+                    traceback.print_exc()
+                    raise
+    except Exception:
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
     try:
-        asyncio.run(campaigns_all(list_id, fecha_inicio, fecha_termina)) # type: ignore
+        df_charge = asyncio.run(campaigns_all(list_id, fecha_inicio, fecha_termina)) # type: ignore
+        insert_bd(df_charge)
         print("Proceso completado.")
     except Exception as e:
         traceback.print_exc()
