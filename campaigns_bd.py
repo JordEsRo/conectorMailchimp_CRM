@@ -108,7 +108,7 @@ async def fetch_page(client, base_url, offset, count, list_id):
     if ultimo_error is not None:
         raise ultimo_error
 
-    raise RuntimeError(f"No se pudo obtener la página de la campaña {campaign_id}")
+    raise RuntimeError(f"No se pudo obtener la página con offset {offset} después de 3 intentos.")
 
 # obtener cantidad de paginas
 async def obtener_total_items(client, url_campaign_all, params):
