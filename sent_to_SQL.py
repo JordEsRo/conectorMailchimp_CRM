@@ -443,12 +443,12 @@ async def main_async():
 
     print("Proceso completado.")
 
+def run():
+    try:
+        asyncio.run(main_async())
+    except Exception:
+        traceback.print_exc()
 
 # main
 if __name__ == "__main__":
-
-    try:
-        asyncio.run(main_async())
-
-    except Exception:
-        traceback.print_exc()
+    run()

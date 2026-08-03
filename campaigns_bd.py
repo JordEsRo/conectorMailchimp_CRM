@@ -220,10 +220,13 @@ async def campaigns_all(list_id: str, fecha_inicio: str, fecha_termina: str):
         except httpx.RequestError as e:
             print(e)
 
-
-if __name__ == "__main__":
+def run():
     try:
         asyncio.run(campaigns_all(list_id, fecha_inicio, fecha_termina)) # type: ignore
         print("Proceso completado.")
     except Exception as e:
         traceback.print_exc()
+
+
+if __name__ == "__main__":
+    run()
