@@ -1,61 +1,27 @@
 import pandas as pd
 import os
-import urllib.parse
 import asyncio
 import httpx
-from dotenv import load_dotenv
-import sys
-import os
 import math
 from typing import List, Dict, Any
-import pyodbc
-from sqlalchemy import create_engine, text
 import traceback
 from sqlalchemy.exc import SQLAlchemyError,DBAPIError
 import time
-
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
-api_key = os.getenv("API_KEY")
-url = os.getenv("URL")
-list_id = os.getenv("id_audience")
-
-server = os.getenv('DB_SERVER') 
-database = os.getenv('DB_NAME') 
-username = os.getenv('DB_USER') 
-password = os.getenv('DB_PASSWORD') 
-connection_string = ( 
-    f'DRIVER={{ODBC Driver 17 for SQL Server}};' 
-    f'SERVER={server};' 
-    f'DATABASE={database};' 
-    f'UID={username};' 
-    f'PWD={password};'
-    'Encrypt=no;'
-    'TrustServerCertificate=yes;' 
-)
-params = urllib.parse.quote_plus(connection_string)
-engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+from config import engine, url, list_id, headers
+from sqlalchemy import text
 
 with engine.begin() as connection:
     df_ids = pd.read_sql_query("" \
     "SELECT id " \
     "FROM UPAXIS.MAILCHIMP_CAMPAIGN " \
-    "where convert(nvarchar(6),fecha_envio,112) between '202601' and '202612' "
-    "and estado IN ('P','X','E') " \
+    #"where convert(nvarchar(6),fecha_envio,112) between '202601' and '202612' "
+    "where convert(nvarchar(6),fecha_envio,112) >= '202501' " \
+    "and estado = 'P' " \
     "order by fecha_envio desc", connection)
 
 print(f"Cantidad de ids a procesar...",{len(df_ids)})
 
 df_ids.to_csv("campaign_ids.csv", index=False)
-
-headers = {
-    "Authorization": f"Bearer {api_key}"
-}
 
 timeout = httpx.Timeout(
     connect=10.0,
@@ -118,7 +84,10 @@ async def fetch_page(client, base_url, offset, count, campaign_id):
                 await asyncio.sleep(10)
 
     if ultimo_error is not None:
-        raise ultimo_error
+        raise RuntimeError(
+            f"Campaña={campaign_id}, offset={offset}, "
+            f"después de 3 intentos. Error: {ultimo_error}"
+        ) from ultimo_error
 
     raise RuntimeError(f"No se pudo obtener la página de la campaña {campaign_id}")
 
@@ -348,7 +317,7 @@ def confirmar_lote(campañas_lote, connection):
     print("Confirmación terminada")
 
 
-sem = asyncio.Semaphore(2)
+sem = asyncio.Semaphore(3)
 
 async def procesar_campania(campaign_id):
     async with sem:
